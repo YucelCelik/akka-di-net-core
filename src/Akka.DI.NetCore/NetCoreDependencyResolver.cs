@@ -9,9 +9,11 @@ namespace Akka.DI.NetCore
 {
     public class NetCoreDependencyResolver : IDependencyResolver, INoSerializationVerificationNeeded
     {
-        private readonly IServiceCollection _serviceCollection;
-        private readonly ConcurrentDictionary<string, Type> _typeCache;
         private readonly ActorSystem _system;
+        private readonly IServiceCollection _serviceCollection;
+        private readonly IServiceProvider _serviceProvider;
+        private readonly ConcurrentDictionary<string, Type> _typeCache = new ConcurrentDictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<ActorBase, IServiceScope> _activeScopes = new ConcurrentDictionary<ActorBase, IServiceScope>();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NetCoreDependencyResolver"/> class.
@@ -23,10 +25,10 @@ namespace Akka.DI.NetCore
         /// </exception>
         public NetCoreDependencyResolver(IServiceCollection serviceCollection, ActorSystem system)
         {
-            this._serviceCollection = serviceCollection ?? throw new ArgumentNullException("serviceCollection");
-            _typeCache = new ConcurrentDictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
-            this._system = system ?? throw new ArgumentNullException("system");
-            this._system.AddDependencyResolver(this);
+            _system = system ?? throw new ArgumentNullException(nameof(system));
+            _serviceCollection = serviceCollection ?? throw new ArgumentNullException(nameof(serviceCollection));
+            _serviceProvider = _serviceCollection.BuildServiceProvider();
+            _system.AddDependencyResolver(this);
         }
 
         /// <summary>
@@ -53,7 +55,13 @@ namespace Akka.DI.NetCore
         /// <returns>A delegate factory used to create actors</returns>
         public Func<ActorBase> CreateActorFactory(Type actorType)
         {
-            return () => (ActorBase)_serviceCollection.BuildServiceProvider().GetService(actorType);
+            return () =>
+            {
+                var serviceScope = _serviceProvider.CreateScope();
+                var actor = (ActorBase)serviceScope.ServiceProvider.GetService(actorType);
+                _activeScopes[actor] = serviceScope;
+                return actor;
+            };
         }
 
         /// <summary>
@@ -83,8 +91,10 @@ namespace Akka.DI.NetCore
         /// <param name="actor">The actor to remove from the container</param>
         public void Release(ActorBase actor)
         {
-            var serviceDescriptor = _serviceCollection.FirstOrDefault(descriptor => descriptor.ServiceType == typeof(ActorBase));
-            _serviceCollection.Remove(serviceDescriptor);
+            if (_activeScopes.TryRemove(actor, out var scope))
+            {
+                scope.Dispose();
+            }
         }
     }
 }
